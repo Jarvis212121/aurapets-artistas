@@ -219,7 +219,7 @@
       }
 
       return new Promise((resolve, reject) => {
-        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const requestId = window.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const target = `aurapets-registration-${requestId}`;
         const form = document.createElement('form');
         const frame = document.createElement('iframe');
@@ -238,8 +238,7 @@
         };
         const onMessage = (event) => {
           const message = event.data;
-          if (event.source !== frame.contentWindow || !message ||
-              message.source !== 'aura-artists-registration' || message.requestId !== requestId) return;
+          if (!message || message.source !== 'aura-artists-registration' || message.requestId !== requestId) return;
           if (message.result && message.result.ok === true) {
             finish(resolve, message.result);
           } else {
