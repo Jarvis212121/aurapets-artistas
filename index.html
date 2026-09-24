@@ -211,21 +211,66 @@
       };
     }
 
-    // POST mediante formulario oculto: funciona en Safari/Chrome móvil sin CORS ni SDKs.
+    // POST mediante formulario oculto; el Apps Script confirma el resultado con postMessage.
     function submitRegistrationToSheet() {
       const endpoint = window.AURAPETS_CONFIG && window.AURAPETS_CONFIG.GOOGLE_APPS_SCRIPT_URL;
-      if (!endpoint || endpoint.includes('PEGA_AQUI')) return false;
-      const form = document.createElement('form');
-      const frame = document.createElement('iframe');
-      const target = 'aurapets-registration-target';
-      form.method = 'POST'; form.action = endpoint; form.target = target; form.hidden = true;
-      frame.name = target; frame.hidden = true;
-      const payload = document.createElement('input');
-      payload.type = 'hidden'; payload.name = 'payload'; payload.value = JSON.stringify(registrationPayload());
-      form.appendChild(payload); document.body.appendChild(frame); document.body.appendChild(form);
-      form.submit();
-      setTimeout(() => { form.remove(); frame.remove(); }, 10000);
-      return true;
+      if (!endpoint || endpoint.includes('PEGA_AQUI')) {
+        return Promise.reject(new Error('Falta configurar el receptor de Google Sheets.'));
+      }
+
+      return new Promise((resolve, reject) => {
+        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const target = `aurapets-registration-${requestId}`;
+        const form = document.createElement('form');
+        const frame = document.createElement('iframe');
+        let settled = false;
+        const cleanup = () => {
+          window.removeEventListener('message', onMessage);
+          window.clearTimeout(timeoutId);
+          form.remove();
+          frame.remove();
+        };
+        const finish = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          callback(value);
+        };
+        const onMessage = (event) => {
+          const message = event.data;
+          if (event.source !== frame.contentWindow || !message ||
+              message.source !== 'aura-artists-registration' || message.requestId !== requestId) return;
+          if (message.result && message.result.ok === true) {
+            finish(resolve, message.result);
+          } else {
+            finish(reject, new Error(message.result && message.result.error || 'Google Sheets no confirmó el registro.'));
+          }
+        };
+        const timeoutId = window.setTimeout(() => {
+          finish(reject, new Error('No llegó confirmación de Google Sheets en 30 segundos. Revisa tu conexión e inténtalo de nuevo.'));
+        }, 30000);
+
+        form.method = 'POST'; form.action = endpoint; form.target = target; form.hidden = true;
+        frame.name = target; frame.hidden = true;
+        const values = {
+          payload: JSON.stringify(registrationPayload()),
+          responseMode: 'iframe',
+          requestId
+        };
+        Object.entries(values).forEach(([name, value]) => {
+          const input = document.createElement('input');
+          input.type = 'hidden'; input.name = name; input.value = value;
+          form.appendChild(input);
+        });
+        window.addEventListener('message', onMessage);
+        document.body.appendChild(frame);
+        document.body.appendChild(form);
+        try {
+          form.submit();
+        } catch (error) {
+          finish(reject, error instanceof Error ? error : new Error('No se pudo enviar el registro.'));
+        }
+      });
     }
 
     function getWhatsAppUrl() {
@@ -1125,14 +1170,29 @@
           document.getElementById('btnEditAny').onclick = () => {
             goToStep(1);
           };
-          document.getElementById('btnConfirmSubmission').onclick = () => {
-            const savedToSheet = submitRegistrationToSheet();
+          document.getElementById('btnConfirmSubmission').onclick = async (event) => {
+            const button = event.currentTarget;
+            const originalButtonContent = button.innerHTML;
             const whatsappUrl = getWhatsAppUrl();
-            if (whatsappUrl) window.open(whatsappUrl, '_blank', 'noopener');
-            if (!savedToSheet) {
-              alert('El registro está listo, pero falta activar el enlace seguro de Google Sheets. No se ha perdido ningún dato.');
-            } else if (!whatsappUrl) {
-              alert('Registro enviado a la hoja de artistas.');
+            const whatsappWindow = whatsappUrl ? window.open('about:blank', '_blank') : null;
+            button.disabled = true;
+            button.innerHTML = '<span>Guardando registro…</span>';
+            try {
+              const result = await submitRegistrationToSheet();
+              if (whatsappWindow && whatsappUrl) {
+                whatsappWindow.opener = null;
+                whatsappWindow.location.replace(whatsappUrl);
+              }
+              alert(result.duplicate
+                ? 'Este correo ya estaba registrado. No se creó un duplicado.'
+                : 'Registro guardado correctamente en la hoja de artistas.');
+            } catch (error) {
+              if (whatsappWindow) whatsappWindow.close();
+              const message = error instanceof Error ? error.message : 'Error inesperado al guardar.';
+              alert(`No se confirmó el guardado: ${message}`);
+            } finally {
+              button.disabled = false;
+              button.innerHTML = originalButtonContent;
             }
           };
 
