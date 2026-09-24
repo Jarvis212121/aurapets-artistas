@@ -211,7 +211,8 @@
       };
     }
 
-    // POST mediante formulario oculto; el Apps Script confirma el resultado con postMessage.
+    // POST mediante formulario oculto. La confirmación se consulta por JSONP porque
+    // Apps Script suele redirigir la respuesta del iframe a otro origen.
     function submitRegistrationToSheet() {
       const endpoint = window.AURAPETS_CONFIG && window.AURAPETS_CONFIG.GOOGLE_APPS_SCRIPT_URL;
       if (!endpoint || endpoint.includes('PEGA_AQUI')) {
@@ -224,9 +225,14 @@
         const form = document.createElement('form');
         const frame = document.createElement('iframe');
         let settled = false;
+        let pollTimer = null;
+        let activeScript = null;
+        let pollAttempts = 0;
         const cleanup = () => {
-          window.removeEventListener('message', onMessage);
           window.clearTimeout(timeoutId);
+          window.clearTimeout(pollTimer);
+          if (activeScript) activeScript.remove();
+          if (window.__auraRegistrationCallbacks) delete window.__auraRegistrationCallbacks[callbackName];
           form.remove();
           frame.remove();
         };
@@ -236,18 +242,38 @@
           cleanup();
           callback(value);
         };
-        const onMessage = (event) => {
-          const message = event.data;
-          if (!message || message.source !== 'aura-artists-registration' || message.requestId !== requestId) return;
-          if (message.result && message.result.ok === true) {
-            finish(resolve, message.result);
-          } else {
-            finish(reject, new Error(message.result && message.result.error || 'Google Sheets no confirmó el registro.'));
-          }
+        const callbackName = `cb_${requestId.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        const callbackRegistry = window.__auraRegistrationCallbacks || (window.__auraRegistrationCallbacks = {});
+        const pollStatus = () => {
+          if (settled) return;
+          pollAttempts += 1;
+          const query = new URLSearchParams({ statusId: requestId, callback: `__auraRegistrationCallbacks.${callbackName}`, _: String(Date.now()) });
+          activeScript = document.createElement('script');
+          activeScript.src = `${endpoint}${endpoint.includes('?') ? '&' : '?'}${query}`;
+          activeScript.onerror = () => {
+            activeScript.remove();
+            activeScript = null;
+            pollTimer = window.setTimeout(pollStatus, 1500);
+          };
+          callbackRegistry[callbackName] = (status) => {
+            if (activeScript) activeScript.remove();
+            activeScript = null;
+            if (status && status.state === 'complete' && status.result) {
+              if (status.result.ok === true) finish(resolve, status.result);
+              else finish(reject, new Error(status.result.error || 'No se pudo guardar el registro.'));
+              return;
+            }
+            if (pollAttempts >= 35) {
+              finish(reject, new Error('Google Sheets no confirmó el registro en 60 segundos. Verifica la hoja antes de volver a enviarlo.'));
+              return;
+            }
+            pollTimer = window.setTimeout(pollStatus, 1500);
+          };
+          document.head.appendChild(activeScript);
         };
         const timeoutId = window.setTimeout(() => {
-          finish(reject, new Error('No llegó confirmación de Google Sheets en 30 segundos. Revisa tu conexión e inténtalo de nuevo.'));
-        }, 30000);
+          finish(reject, new Error('Google Sheets no confirmó el registro en 60 segundos. Verifica la hoja antes de volver a enviarlo.'));
+        }, 60000);
 
         form.method = 'POST'; form.action = endpoint; form.target = target; form.hidden = true;
         frame.name = target; frame.hidden = true;
@@ -261,11 +287,11 @@
           input.type = 'hidden'; input.name = name; input.value = value;
           form.appendChild(input);
         });
-        window.addEventListener('message', onMessage);
         document.body.appendChild(frame);
         document.body.appendChild(form);
         try {
           form.submit();
+          pollTimer = window.setTimeout(pollStatus, 1000);
         } catch (error) {
           finish(reject, error instanceof Error ? error : new Error('No se pudo enviar el registro.'));
         }
